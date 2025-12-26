@@ -11,7 +11,7 @@ const corsOptions = {
     'http://localhost:3000',
     'http://localhost:3001', 
     'https://inventory-frontend-zeta-coral.vercel.app',
-    /\.vercel\.app$/ // Allow all Vercel preview deployments
+    /\.vercel\.app$/
   ],
   credentials: true,
   optionsSuccessStatus: 200
@@ -20,27 +20,10 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// ===== STARTUP VALIDATION =====
-console.log("=== SERVER STARTUP ===");
-const groqKey = process.env.GROQ_API_KEY?.trim();
-if (!groqKey) {
-  console.error("❌ CRITICAL: GROQ_API_KEY not found in environment!");
-  console.error("   Add this to your .env file: GROQ_API_KEY=gsk_your_key_here");
-} else {
-  console.log("✅ Groq API Key loaded successfully");
-  console.log(`   Key length: ${groqKey.length} characters`);
-  console.log(`   Preview: ${groqKey.substring(0, 15)}...`);
-}
-console.log("======================\n");
-
-// ===== MONGODB CONNECTION =====
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/inventory_db";
 
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+mongoose.connect(MONGO_URI);
 
-// ===== SCHEMAS =====
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   sku: { type: String, required: true, unique: true },
@@ -63,16 +46,7 @@ const saleSchema = new mongoose.Schema({
 
 const Sale = mongoose.model("Sale", saleSchema);
 
-// ===== HEALTH CHECK =====
-app.get("/health", (req, res) => {
-  res.json({ 
-    status: "OK", 
-    message: "Server is running",
-    groqConfigured: !!process.env.GROQ_API_KEY 
-  });
-});
 
-// ===== PRODUCT ROUTES =====
 app.get("/api/products", async (req, res) => {
   try {
     const products = await Product.find().sort({ createdAt: -1 });
@@ -232,7 +206,6 @@ app.get("/api/products/search", async (req, res) => {
   }
 });
 
-// ===== SALES ROUTES =====
 app.post("/api/sales", async (req, res) => {
   try {
     const { productId, quantity, price } = req.body;
@@ -324,7 +297,6 @@ app.get("/api/sales/summary", async (req, res) => {
   }
 });
 
-// ===== ALERTS ROUTE =====
 app.get("/api/alerts", async (req, res) => {
   try {
     const products = await Product.find();
@@ -390,33 +362,23 @@ app.put("/api/alerts/:alertId/acknowledge", async (req, res) => {
   }
 });
 
-// ===== AI INSIGHTS WITH GROQ =====
+// AI Insights with Groq
 app.post("/api/ai/insights", async (req, res) => {
-  console.log("\n🤖 === AI INSIGHTS REQUEST ===");
-  
   try {
     const { products } = req.body;
 
     if (!products || products.length === 0) {
-      console.log("❌ No products provided");
       return res.status(400).json({ error: "No products to analyze" });
     }
 
-    console.log(`📦 Received ${products.length} products for analysis`);
-
-    // Validate API key
     const apiKey = process.env.GROQ_API_KEY?.trim();
     
     if (!apiKey) {
-      console.error("❌ GROQ_API_KEY not found!");
       return res.status(500).json({ 
         error: "Groq API key not configured. Please add GROQ_API_KEY to your .env file" 
       });
     }
-
-    console.log("✅ API key validated");
     
-    // Calculate metrics
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     
@@ -429,8 +391,6 @@ app.post("/api/ai/insights", async (req, res) => {
 
     const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
     const deadStockValue = deadStock.reduce((sum, p) => sum + (p.quantity * p.price), 0);
-
-    console.log(`📊 Metrics: ${outOfStock.length} out of stock, ${lowStock.length} low stock, ${deadStock.length} dead stock`);
 
     const prompt = `You are an inventory management expert for an AEC materials business in India. Analyze this data and provide actionable insights:
 
@@ -459,8 +419,6 @@ Please provide a structured analysis with these sections:
 
 Keep your response clear, direct, and actionable for business decision-making.`;
 
-    console.log("🚀 Calling Groq API (Llama 3.3 70B Versatile)...");
-
     const response = await fetch(
       "https://api.groq.com/openai/v1/chat/completions",
       {
@@ -487,24 +445,18 @@ Keep your response clear, direct, and actionable for business decision-making.`;
       }
     );
 
-    console.log(`📡 Groq API Response Status: ${response.status}`);
-
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("❌ Groq API Error Response:", errorText);
-      
       let errorMessage = `Groq API request failed with status ${response.status}`;
       
       try {
         const errorJson = JSON.parse(errorText);
         errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
       } catch (e) {
-        // Keep default error message
       }
       
       return res.status(response.status).json({ 
         error: errorMessage,
-        details: errorText,
         status: response.status
       });
     }
@@ -512,26 +464,15 @@ Keep your response clear, direct, and actionable for business decision-making.`;
     const data = await response.json();
     
     if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-      console.error("❌ Unexpected API response structure:", JSON.stringify(data, null, 2));
       return res.status(500).json({ 
-        error: "Unexpected response format from Groq API",
-        details: "Response did not contain expected 'choices' array"
+        error: "Unexpected response format from Groq API"
       });
     }
 
     const insights = data.choices[0].message.content;
-    
-    console.log("✅ Successfully generated insights!");
-    console.log(`📝 Insights length: ${insights.length} characters`);
-    console.log("=== END REQUEST ===\n");
-
     res.json({ insights });
 
   } catch (error) {
-    console.error("❌ Exception in /api/ai/insights:", error);
-    console.error("Stack trace:", error.stack);
-    console.log("=== END REQUEST (ERROR) ===\n");
-    
     res.status(500).json({ 
       error: error.message || "Internal server error",
       type: error.name
@@ -539,86 +480,10 @@ Keep your response clear, direct, and actionable for business decision-making.`;
   }
 });
 
-// ===== TEST ENDPOINT FOR GROQ =====
-app.get("/api/test-groq", async (req, res) => {
-  console.log("\n🧪 Testing Groq API connection...");
-  
-  try {
-    const apiKey = process.env.GROQ_API_KEY?.trim();
-    
-    if (!apiKey) {
-      console.log("❌ No API key found");
-      return res.json({ 
-        success: false,
-        error: "GROQ_API_KEY not found in .env file",
-        hint: "Add GROQ_API_KEY=gsk_your_key_here to your .env file"
-      });
-    }
-
-    console.log(`✓ API key found (${apiKey.length} chars)`);
-    console.log("🚀 Making test request to Groq...");
-    
-    const response = await fetch(
-      "https://api.groq.com/openai/v1/chat/completions",
-      {
-        method: "POST",
-        headers: { 
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [
-            { role: "user", content: "Say 'Groq API is working perfectly! 🚀'" }
-          ],
-          max_tokens: 50
-        })
-      }
-    );
-    
-    console.log(`📡 Response status: ${response.status}`);
-    
-    const data = await response.json();
-    
-    if (response.ok && data.choices && data.choices[0]) {
-      console.log("✅ Test successful!");
-      res.json({ 
-        success: true,
-        message: "Groq API connection successful!",
-        response: data.choices[0].message.content,
-        model: "llama-3.3-70b-versatile",
-        status: response.status
-      });
-    } else {
-      console.log("❌ Test failed");
-      res.json({ 
-        success: false,
-        status: response.status,
-        error: data,
-        hint: "Check if your API key is valid at https://console.groq.com"
-      });
-    }
-    
-  } catch (error) {
-    console.error("❌ Test error:", error.message);
-    res.json({ 
-      success: false,
-      error: error.message,
-      type: error.name
-    });
-  }
-});
-
-// ===== 404 HANDLER =====
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
-// ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log("\n🚀 ===== SERVER STARTED =====");
-  console.log(`   URL: http://localhost:${PORT}`);
-  console.log(`   Groq API: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ NOT CONFIGURED'}`);
-  console.log(`   MongoDB: ${MONGO_URI}`);
-  console.log("==============================\n");
+  console.log(`URL: http://localhost:${PORT}`);
 });
