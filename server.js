@@ -9,12 +9,27 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+// ===== STARTUP VALIDATION =====
+console.log("=== SERVER STARTUP ===");
+const groqKey = process.env.GROQ_API_KEY?.trim();
+if (!groqKey) {
+  console.error("❌ CRITICAL: GROQ_API_KEY not found in environment!");
+  console.error("   Add this to your .env file: GROQ_API_KEY=gsk_your_key_here");
+} else {
+  console.log("✅ Groq API Key loaded successfully");
+  console.log(`   Key length: ${groqKey.length} characters`);
+  console.log(`   Preview: ${groqKey.substring(0, 15)}...`);
+}
+console.log("======================\n");
+
+// ===== MONGODB CONNECTION =====
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/inventory_db";
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
+// ===== SCHEMAS =====
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   sku: { type: String, required: true, unique: true },
@@ -37,11 +52,16 @@ const saleSchema = new mongoose.Schema({
 
 const Sale = mongoose.model("Sale", saleSchema);
 
-
+// ===== HEALTH CHECK =====
 app.get("/health", (req, res) => {
-  res.json({ status: "OK", message: "Server is running" });
+  res.json({ 
+    status: "OK", 
+    message: "Server is running",
+    groqConfigured: !!process.env.GROQ_API_KEY 
+  });
 });
 
+// ===== PRODUCT ROUTES =====
 app.get("/api/products", async (req, res) => {
   try {
     const products = await Product.find().sort({ createdAt: -1 });
@@ -77,13 +97,11 @@ app.post("/api/products/add", async (req, res) => {
   }
 });
 
-
 app.get("/api/products/low-stock", async (req, res) => {
   try {
     const products = await Product.find({
       $expr: { $lte: ["$quantity", "$reorderLevel"] }
     }).sort({ quantity: 1 });
-
     res.json(products);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -101,7 +119,6 @@ app.get("/api/products/dead-stock", async (req, res) => {
       ],
       quantity: { $gt: 0 } 
     }).sort({ lastSoldAt: 1 });
-
     res.json(products);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -111,14 +128,11 @@ app.get("/api/products/dead-stock", async (req, res) => {
 app.get("/api/products/stats", async (req, res) => {
   try {
     const totalProducts = await Product.countDocuments();
-    
     const lowStockCount = await Product.countDocuments({
       $expr: { $lte: ["$quantity", "$reorderLevel"] }
     });
-
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
     const deadStockCount = await Product.countDocuments({
       $or: [
         { lastSoldAt: { $lt: thirtyDaysAgo } },
@@ -128,7 +142,6 @@ app.get("/api/products/stats", async (req, res) => {
     });
     const products = await Product.find();
     const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
-
     res.json({
       totalProducts,
       lowStockCount,
@@ -144,52 +157,19 @@ app.put("/api/products/:id/quantity", async (req, res) => {
   try {
     const { id } = req.params;
     const { quantity } = req.body;
-
     const product = await Product.findByIdAndUpdate(
       id,
       { quantity: Number(quantity), updatedAt: Date.now() },
       { new: true }
     );
-
     if (!product) {
       return res.status(404).json({ error: "Product not found" });
     }
-
     res.json({ message: "Quantity updated", product });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
-app.post("/api/sales", async (req, res) => {
-  try {
-    const { productId, quantity, price } = req.body;
-
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    if (product.quantity < quantity) {
-      return res.status(400).json({ error: "Insufficient stock" });
-    }
-    const sale = new Sale({ 
-      productId, 
-      quantity: Number(quantity), 
-      price: Number(price) 
-    });
-    await sale.save();
-    product.quantity -= Number(quantity);
-    product.lastSoldAt = Date.now();
-    product.updatedAt = Date.now();
-    await product.save();
-
-    res.json({ message: "Sale recorded successfully", sale, product });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 
 app.delete("/api/products/:id", async (req, res) => {
   try {
@@ -203,233 +183,11 @@ app.delete("/api/products/:id", async (req, res) => {
   }
 });
 
-
-app.post("/api/ai/insights", async (req, res) => {
-  try {
-    const { products } = req.body;
-
-    if (!products || products.length === 0) {
-      return res.status(400).json({ error: "No products to analyze" });
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    
-    if (!apiKey) {
-      console.error("GEMINI_API_KEY not found");
-      return res.status(500).json({ 
-        error: "Gemini API key not configured"
-      });
-    }
-
-    console.log("API Key found (first 10 chars):", apiKey.substring(0, 10));
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const lowStock = products.filter(p => p.quantity > 0 && p.quantity <= p.reorderLevel);
-    const outOfStock = products.filter(p => p.quantity === 0);
-    const deadStock = products.filter(p => {
-      if (!p.lastSoldAt) return p.quantity > 0;
-      return new Date(p.lastSoldAt) < thirtyDaysAgo && p.quantity > 0;
-    });
-
-    const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
-    const deadStockValue = deadStock.reduce((sum, p) => sum + (p.quantity * p.price), 0);
-
-    const prompt = `You are an inventory management expert for an AEC materials business in India. Analyze this data and provide a clear, well-formatted analysis:
-
-INVENTORY OVERVIEW:
-- Total Products: ${products.length}
-- Out of Stock: ${outOfStock.length} (URGENT)
-- Low Stock: ${lowStock.length} (needs reorder)
-- Dead Stock: ${deadStock.length} (no sales 30+ days)
-- Total Value: ₹${totalValue.toLocaleString('en-IN')}
-- Dead Stock Value: ₹${deadStockValue.toLocaleString('en-IN')}
-
-Please provide a structured analysis with these sections:
-
-HEALTH SCORE: Rate from 1-10 with a brief explanation
-
-TOP 3 IMMEDIATE ACTIONS:
-1. [First action with specific details]
-2. [Second action with expected benefit]
-3. [Third action with rationale]
-
-OPTIMIZATION STRATEGY:
-[One key strategy to improve inventory management]
-
-CRITICAL WARNINGS:
-[Any urgent issues that need immediate attention, or "None" if all is well]
-
-Keep your response clear, direct, and actionable. Use simple formatting.`;
-
-    console.log("Calling Gemini API...");
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: prompt }]
-          }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 2048
-          }
-        })
-      }
-    );
-
-    console.log("📡 Response status:", response.status);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Gemini error:", errorText);
-      throw new Error(`Gemini API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const insights = data.candidates[0].content.parts[0].text;
-    
-    console.log("Success!");
-    res.json({ insights });
-
-  } catch (error) {
-    console.error("Error:", error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get("/api/test-gemini", async (req, res) => {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    
-    if (!apiKey) {
-      return res.json({ 
-        success: false,
-        error: "GEMINI_API_KEY not found"
-      });
-    }
-
-    console.log("Testing Gemini API...");
-    console.log("API Key (first 10 chars):", apiKey.substring(0, 10));
-    
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: "Say 'Hello! API is working!'" }]
-          }]
-        })
-      }
-    );
-    
-    console.log("Test Response Status:", response.status);
-    const data = await response.json();
-    
-    if (response.ok) {
-      res.json({ 
-        success: true,
-        message: "Gemini API is working!",
-        response: data.candidates[0].content.parts[0].text,
-        status: response.status
-      });
-    } else {
-      res.json({ 
-        success: false,
-        status: response.status,
-        error: data
-      });
-    }
-    
-  } catch (error) {
-    res.json({ 
-      success: false,
-      error: error.message 
-    });
-  }
-});
-
-app.get("/api/alerts", async (req, res) => {
-  try {
-    const products = await Product.find();
-    const alerts = [];
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    products.forEach(p => {
-      if (p.quantity === 0) {
-        alerts.push({
-          id: `${p._id}-outofstock`,
-          type: "critical",
-          title: "Out of Stock",
-          message: `${p.name} (${p.sku}) is completely out of stock! Immediate reorder required.`,
-          timestamp: new Date(),
-          productId: p._id,
-          acknowledged: false
-        });
-      }
-      else if (p.quantity <= p.reorderLevel) {
-        alerts.push({
-          id: `${p._id}-lowstock`,
-          type: "warning",
-          title: "Low Stock Alert",
-          message: `${p.name} (${p.sku}) is running low: only ${p.quantity} units remaining (reorder at ${p.reorderLevel})`,
-          timestamp: new Date(),
-          productId: p._id,
-          acknowledged: false
-        });
-      }
-
-      if ((!p.lastSoldAt || new Date(p.lastSoldAt) < thirtyDaysAgo) && p.quantity > 0) {
-        const daysOld = p.lastSoldAt 
-          ? Math.floor((new Date() - new Date(p.lastSoldAt)) / (1000 * 60 * 60 * 24))
-          : 'Never sold';
-        
-        alerts.push({
-          id: `${p._id}-deadstock`,
-          type: "warning",
-          title: "Dead Stock Detected",
-          message: `${p.name} (${p.sku}) hasn't sold in ${daysOld === 'Never sold' ? daysOld.toLowerCase() : daysOld + ' days'}. Consider discount or discontinuation.`,
-          timestamp: new Date(),
-          productId: p._id,
-          acknowledged: false
-        });
-      }
-    });
-
-    alerts.sort((a, b) => {
-      if (a.type === "critical" && b.type !== "critical") return -1;
-      if (a.type !== "critical" && b.type === "critical") return 1;
-      return 0;
-    });
-
-    res.json(alerts);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put("/api/alerts/:alertId/acknowledge", async (req, res) => {
-  try {
-    res.json({ 
-      message: "Alert acknowledged",
-      alertId: req.params.alertId 
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
 app.get("/api/products/search", async (req, res) => {
   try {
     const { query, status, sortBy } = req.query;
-    
     let filter = {};
+    
     if (query) {
       filter.$or = [
         { name: { $regex: query, $options: 'i' } },
@@ -458,6 +216,33 @@ app.get("/api/products/search", async (req, res) => {
     }
     
     res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== SALES ROUTES =====
+app.post("/api/sales", async (req, res) => {
+  try {
+    const { productId, quantity, price } = req.body;
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    if (product.quantity < quantity) {
+      return res.status(400).json({ error: "Insufficient stock" });
+    }
+    const sale = new Sale({ 
+      productId, 
+      quantity: Number(quantity), 
+      price: Number(price) 
+    });
+    await sale.save();
+    product.quantity -= Number(quantity);
+    product.lastSoldAt = Date.now();
+    product.updatedAt = Date.now();
+    await product.save();
+    res.json({ message: "Sale recorded successfully", sale, product });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -528,39 +313,301 @@ app.get("/api/sales/summary", async (req, res) => {
   }
 });
 
-app.get("/api/test-gemini", async (req, res) => {
+// ===== ALERTS ROUTE =====
+app.get("/api/alerts", async (req, res) => {
   try {
-    console.log("API Key exists:", !!process.env.GEMINI_API_KEY);
-    console.log("API Key (first 10 chars):", process.env.GEMINI_API_KEY?.substring(0, 10));
+    const products = await Product.find();
+    const alerts = [];
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     
-    const testResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: "Say hello" }]
-          }]
-        })
+    products.forEach(p => {
+      if (p.quantity === 0) {
+        alerts.push({
+          id: `${p._id}-outofstock`,
+          type: "critical",
+          title: "Out of Stock",
+          message: `${p.name} (${p.sku}) is completely out of stock!`,
+          timestamp: new Date(),
+          productId: p._id,
+          acknowledged: false
+        });
+      } else if (p.quantity <= p.reorderLevel) {
+        alerts.push({
+          id: `${p._id}-lowstock`,
+          type: "warning",
+          title: "Low Stock Alert",
+          message: `${p.name} (${p.sku}) is running low: ${p.quantity} units remaining`,
+          timestamp: new Date(),
+          productId: p._id,
+          acknowledged: false
+        });
       }
-    );
-    
-    const data = await testResponse.json();
+
+      if ((!p.lastSoldAt || new Date(p.lastSoldAt) < thirtyDaysAgo) && p.quantity > 0) {
+        const daysOld = p.lastSoldAt 
+          ? Math.floor((new Date() - new Date(p.lastSoldAt)) / (1000 * 60 * 60 * 24))
+          : 'Never sold';
+        
+        alerts.push({
+          id: `${p._id}-deadstock`,
+          type: "warning",
+          title: "Dead Stock Detected",
+          message: `${p.name} (${p.sku}) hasn't sold in ${daysOld === 'Never sold' ? daysOld.toLowerCase() : daysOld + ' days'}`,
+          timestamp: new Date(),
+          productId: p._id,
+          acknowledged: false
+        });
+      }
+    });
+
+    alerts.sort((a, b) => a.type === "critical" ? -1 : 1);
+    res.json(alerts);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/api/alerts/:alertId/acknowledge", async (req, res) => {
+  try {
     res.json({ 
-      status: testResponse.status, 
-      ok: testResponse.ok,
-      data 
+      message: "Alert acknowledged",
+      alertId: req.params.alertId 
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// ===== AI INSIGHTS WITH GROQ =====
+app.post("/api/ai/insights", async (req, res) => {
+  console.log("\n🤖 === AI INSIGHTS REQUEST ===");
+  
+  try {
+    const { products } = req.body;
+
+    if (!products || products.length === 0) {
+      console.log("❌ No products provided");
+      return res.status(400).json({ error: "No products to analyze" });
+    }
+
+    console.log(`📦 Received ${products.length} products for analysis`);
+
+    // Validate API key
+    const apiKey = process.env.GROQ_API_KEY?.trim();
+    
+    if (!apiKey) {
+      console.error("❌ GROQ_API_KEY not found!");
+      return res.status(500).json({ 
+        error: "Groq API key not configured. Please add GROQ_API_KEY to your .env file" 
+      });
+    }
+
+    console.log("✅ API key validated");
+    
+    // Calculate metrics
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const lowStock = products.filter(p => p.quantity > 0 && p.quantity <= p.reorderLevel);
+    const outOfStock = products.filter(p => p.quantity === 0);
+    const deadStock = products.filter(p => {
+      if (!p.lastSoldAt) return p.quantity > 0;
+      return new Date(p.lastSoldAt) < thirtyDaysAgo && p.quantity > 0;
+    });
+
+    const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
+    const deadStockValue = deadStock.reduce((sum, p) => sum + (p.quantity * p.price), 0);
+
+    console.log(`📊 Metrics: ${outOfStock.length} out of stock, ${lowStock.length} low stock, ${deadStock.length} dead stock`);
+
+    const prompt = `You are an inventory management expert for an AEC materials business in India. Analyze this data and provide actionable insights:
+
+INVENTORY DATA:
+- Total Products: ${products.length}
+- Out of Stock: ${outOfStock.length} items (URGENT - need immediate reorder)
+- Low Stock: ${lowStock.length} items (approaching reorder level)
+- Dead Stock: ${deadStock.length} items (no sales in 30+ days)
+- Total Inventory Value: ₹${totalValue.toLocaleString('en-IN')}
+- Dead Stock Value: ₹${deadStockValue.toLocaleString('en-IN')}
+
+Please provide a structured analysis with these sections:
+
+**HEALTH SCORE:** Rate the inventory health from 1-10 with a brief explanation
+
+**TOP 3 IMMEDIATE ACTIONS:**
+1. [First action with specific details]
+2. [Second action with expected benefit]
+3. [Third action with clear rationale]
+
+**OPTIMIZATION STRATEGY:**
+[One key strategy to improve overall inventory management]
+
+**CRITICAL WARNINGS:**
+[Any urgent issues requiring immediate attention, or "None" if inventory is healthy]
+
+Keep your response clear, direct, and actionable for business decision-making.`;
+
+    console.log("🚀 Calling Groq API (Llama 3.3 70B Versatile)...");
+
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content: "You are an expert inventory management consultant specializing in AEC (Architecture, Engineering, Construction) materials businesses in India. Provide clear, actionable advice with specific numbers and recommendations."
+            },
+            {
+              role: "user",
+              content: prompt
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 1500
+        })
+      }
+    );
+
+    console.log(`📡 Groq API Response Status: ${response.status}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("❌ Groq API Error Response:", errorText);
+      
+      let errorMessage = `Groq API request failed with status ${response.status}`;
+      
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.error?.message || errorJson.message || errorMessage;
+      } catch (e) {
+        // Keep default error message
+      }
+      
+      return res.status(response.status).json({ 
+        error: errorMessage,
+        details: errorText,
+        status: response.status
+      });
+    }
+
+    const data = await response.json();
+    
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error("❌ Unexpected API response structure:", JSON.stringify(data, null, 2));
+      return res.status(500).json({ 
+        error: "Unexpected response format from Groq API",
+        details: "Response did not contain expected 'choices' array"
+      });
+    }
+
+    const insights = data.choices[0].message.content;
+    
+    console.log("✅ Successfully generated insights!");
+    console.log(`📝 Insights length: ${insights.length} characters`);
+    console.log("=== END REQUEST ===\n");
+
+    res.json({ insights });
+
+  } catch (error) {
+    console.error("❌ Exception in /api/ai/insights:", error);
+    console.error("Stack trace:", error.stack);
+    console.log("=== END REQUEST (ERROR) ===\n");
+    
+    res.status(500).json({ 
+      error: error.message || "Internal server error",
+      type: error.name
+    });
+  }
+});
+
+// ===== TEST ENDPOINT FOR GROQ =====
+app.get("/api/test-groq", async (req, res) => {
+  console.log("\n🧪 Testing Groq API connection...");
+  
+  try {
+    const apiKey = process.env.GROQ_API_KEY?.trim();
+    
+    if (!apiKey) {
+      console.log("❌ No API key found");
+      return res.json({ 
+        success: false,
+        error: "GROQ_API_KEY not found in .env file",
+        hint: "Add GROQ_API_KEY=gsk_your_key_here to your .env file"
+      });
+    }
+
+    console.log(`✓ API key found (${apiKey.length} chars)`);
+    console.log("🚀 Making test request to Groq...");
+    
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "user", content: "Say 'Groq API is working perfectly! 🚀'" }
+          ],
+          max_tokens: 50
+        })
+      }
+    );
+    
+    console.log(`📡 Response status: ${response.status}`);
+    
+    const data = await response.json();
+    
+    if (response.ok && data.choices && data.choices[0]) {
+      console.log("✅ Test successful!");
+      res.json({ 
+        success: true,
+        message: "Groq API connection successful!",
+        response: data.choices[0].message.content,
+        model: "llama-3.3-70b-versatile",
+        status: response.status
+      });
+    } else {
+      console.log("❌ Test failed");
+      res.json({ 
+        success: false,
+        status: response.status,
+        error: data,
+        hint: "Check if your API key is valid at https://console.groq.com"
+      });
+    }
+    
+  } catch (error) {
+    console.error("❌ Test error:", error.message);
+    res.json({ 
+      success: false,
+      error: error.message,
+      type: error.name
+    });
+  }
+});
+
+// ===== 404 HANDLER =====
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
+// ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log("\n🚀 ===== SERVER STARTED =====");
+  console.log(`   URL: http://localhost:${PORT}`);
+  console.log(`   Groq API: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ NOT CONFIGURED'}`);
+  console.log(`   MongoDB: ${MONGO_URI}`);
+  console.log("==============================\n");
 });
